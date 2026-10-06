@@ -1,0 +1,308 @@
+name: Build mobile apps (APK + IPA)
+
+# Run manually from the Actions tab, or automatically on every push to main.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  # ────────────────────────────────────────────────────────────────
+  # ANDROID — produces a working .apk with ZERO extra setup.
+  # A debug APK is always built. If you add the ANDROID_KEYSTORE_BASE64
+  # secret (and friends, see MOBILE_BUILD.md) it also builds a signed
+  # release APK.
+  # ────────────────────────────────────────────────────────────────
+  android:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Sam znajduje folder, w którym leży package.json - działa niezależnie
+      # od tego, czy projekt jest w katalogu głównym repo, czy w podfolderze
+      # (np. "music-player-fixed"). Naprawia błąd "could not find a
+      # package.json file" / "No such file or directory" przy złym folderze.
+      - name: Locate project directory
+        id: locate
+        run: |
+          pkg=$(find . -maxdepth 4 -name package.json -not -path "*/node_modules/*" -not -path "*/capacitor-youtube-player/*" | awk '{ print length, $0 }' | sort -n | cut -d" " -f2- | head -n 1)
+          if [ -z "$pkg" ]; then
+            echo "::error::Nie znaleziono package.json w repozytorium."
+            exit 1
+          fi
+          dir=$(dirname "$pkg")
+          dir=${dir#./}
+          [ -z "$dir" ] && dir="."
+          echo "Znaleziono projekt w: $dir"
+          echo "PROJECT_DIR=$dir" >> "$GITHUB_ENV"
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: bun install
+
+      - name: Prepare web assets (public/player.html -> www/index.html)
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: npm run prepare:www
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Add Android platform
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: npx cap add android
+
+      # Bez tego kroku Android dostaje domyślną ikonę-placeholder z pustym/
+      # przezroczystym tłem, która ginie na jasnym launcherze (stąd "niewidoczna
+      # ikonka na białym trybie"). Generujemy prawdziwą ikonę z assets/logo.png
+      # na jednolitym, ciemnym tle, żeby była widoczna zawsze - jasny i ciemny motyw.
+      - name: Generate app icon
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: npx @capacitor/assets generate --android --iconBackgroundColor '#0B0B0F' --iconBackgroundColorDark '#0B0B0F' --splashBackgroundColor '#0B0B0F' --splashBackgroundColorDark '#0B0B0F'
+
+      - name: Sync Capacitor
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: npx cap sync android
+
+      # NOTE: the `secrets` context can't be used directly inside an `if:`
+      # condition (GitHub Actions restriction) — it can only appear inside
+      # `run:`/`env:`. So we check it in a `run:` step and expose the result
+      # as a step output, then branch on THAT output in later `if:` checks.
+      - name: Check Android signing secrets
+        id: android_secrets
+        run: |
+          if [ -n "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Decode release keystore
+        if: steps.android_secrets.outputs.configured == 'true'
+        run: echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > ${{ env.PROJECT_DIR }}/android/app/release.keystore
+
+      - name: Build debug APK
+        working-directory: ${{ env.PROJECT_DIR }}/android
+        run: ./gradlew assembleDebug
+
+      - name: Build signed release APK
+        if: steps.android_secrets.outputs.configured == 'true'
+        working-directory: ${{ env.PROJECT_DIR }}/android
+        env:
+          KS_PW: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PW: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          ./gradlew assembleRelease \
+            -Pandroid.injected.signing.store.file=release.keystore \
+            -Pandroid.injected.signing.store.password="$KS_PW" \
+            -Pandroid.injected.signing.key.alias="$KEY_ALIAS" \
+            -Pandroid.injected.signing.key.password="$KEY_PW"
+
+      - name: Upload APK(s)
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          if-no-files-found: warn
+          path: |
+            ${{ env.PROJECT_DIR }}/android/app/build/outputs/apk/debug/*.apk
+            ${{ env.PROJECT_DIR }}/android/app/build/outputs/apk/release/*.apk
+
+  # ────────────────────────────────────────────────────────────────
+  # iOS — Apple requires every app to be code-signed before it can run
+  # on a real iPhone, even for personal side-loading. That signing
+  # identity has to come from YOUR Apple ID / Apple Developer account —
+  # no CI script can generate it for you. See MOBILE_BUILD.md.
+  #
+  # Without the IOS_* secrets below, this job still runs and produces
+  # an UNSIGNED .xcarchive so you can confirm the build succeeds, but
+  # it will NOT install on a real device.
+  # ────────────────────────────────────────────────────────────────
+  ios:
+    name: Build iOS IPA
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Locate project directory
+        id: locate
+        run: |
+          pkg=$(find . -maxdepth 4 -name package.json -not -path "*/node_modules/*" -not -path "*/capacitor-youtube-player/*" | awk '{ print length, $0 }' | sort -n | cut -d" " -f2- | head -n 1)
+          if [ -z "$pkg" ]; then
+            echo "::error::Nie znaleziono package.json w repozytorium."
+            exit 1
+          fi
+          dir=$(dirname "$pkg")
+          dir=${dir#./}
+          [ -z "$dir" ] && dir="."
+          echo "Znaleziono projekt w: $dir"
+          echo "PROJECT_DIR=$dir" >> "$GITHUB_ENV"
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: bun install
+
+      - name: Prepare web assets (public/player.html -> www/index.html)
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: npm run prepare:www
+
+      - name: Add iOS platform
+        working-directory: ${{ env.PROJECT_DIR }}
+        # Capacitor 8 domyślnie NIE używa już CocoaPods dla iOS - przeszedł na
+        # Swift Package Manager (brak Podfile w ogóle, to normalne, nie błąd).
+        # Reszta tego workflow (archiwizacja, eksport IPA) jest napisana pod
+        # klasyczny układ CocoaPods (App.xcworkspace), więc wymuszamy go jawnie.
+        run: npx cap add ios --packagemanager cocoapods
+
+      - name: Generate app icon
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: npx @capacitor/assets generate --ios --iconBackgroundColor '#0B0B0F' --iconBackgroundColorDark '#0B0B0F' --splashBackgroundColor '#0B0B0F' --splashBackgroundColorDark '#0B0B0F'
+
+      - name: Sync Capacitor
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: npx cap sync ios
+
+      - name: Enable Background Audio in Info.plist
+        working-directory: ${{ env.PROJECT_DIR }}/ios/App/App
+        run: |
+          /usr/libexec/PlistBuddy -c "Add :UIBackgroundModes array" Info.plist || true
+          /usr/libexec/PlistBuddy -c "Add :UIBackgroundModes:0 string audio" Info.plist || true
+
+      # Every build gets a unique, strictly-increasing CFBundleVersion (build
+      # number) from the CI run number. iOS treats a re-install with the SAME
+      # version+build as "nothing changed" and can keep the OLD binary that's
+      # still on disk instead of the new one you just built - one of the
+      # classic causes of "installs the old removed app again" / "won't
+      # update". Bumping it here makes every .ipa unambiguously newer.
+      - name: Bump build number (CFBundleVersion)
+        working-directory: ${{ env.PROJECT_DIR }}/ios/App/App
+        run: /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${{ github.run_number }}" Info.plist
+
+      # "npx cap sync ios" powinno samo odpalić "pod install", ale bywa
+      # zawodne (np. gdy lokalny cache CocoaPods na runnerze jest pusty/stary)
+      # i potrafi nie dać błędu mimo że nie utworzyło App.xcworkspace. Robimy
+      # to jawnie, żeby workspace na pewno powstał - bez niego xcodebuild
+      # wywala się z "'App.xcworkspace' does not exist".
+      - name: Install CocoaPods dependencies
+        working-directory: ${{ env.PROJECT_DIR }}/ios/App
+        run: |
+          pod install --repo-update || {
+            echo "Pierwsza próba pod install nie powiodła się - reinstaluję CocoaPods i próbuję ponownie...";
+            sudo gem install cocoapods;
+            pod install --repo-update;
+          }
+
+      - name: Verify Xcode workspace exists
+        working-directory: ${{ env.PROJECT_DIR }}/ios/App
+        run: |
+          if [ ! -d "App.xcworkspace" ]; then
+            echo "::error::App.xcworkspace nie istnieje po 'pod install'. Zawartość folderu:"
+            ls -la
+            exit 1
+          fi
+          echo "OK: App.xcworkspace istnieje."
+
+      # Same reasoning as the Android job: `secrets` isn't allowed directly
+      # inside `if:`, so resolve it to a step output first.
+      - name: Check iOS signing secrets
+        id: ios_secrets
+        run: |
+          if [ -n "${{ secrets.IOS_CERTIFICATE_BASE64 }}" ] && [ -n "${{ secrets.IOS_PROVISION_PROFILE_BASE64 }}" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install signing certificate & provisioning profile
+        if: steps.ios_secrets.outputs.configured == 'true'
+        env:
+          IOS_CERTIFICATE_BASE64: ${{ secrets.IOS_CERTIFICATE_BASE64 }}
+          IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+          IOS_PROVISION_PROFILE_BASE64: ${{ secrets.IOS_PROVISION_PROFILE_BASE64 }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          CERT_PATH="$RUNNER_TEMP/certificate.p12"
+          PROFILE_PATH="$RUNNER_TEMP/profile.mobileprovision"
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+
+          echo -n "$IOS_CERTIFICATE_BASE64" | base64 --decode -o "$CERT_PATH"
+          echo -n "$IOS_PROVISION_PROFILE_BASE64" | base64 --decode -o "$PROFILE_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -P "$IOS_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH" login.keychain
+
+          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+          cp "$PROFILE_PATH" ~/Library/MobileDevice/Provisioning\ Profiles/
+
+      - name: Archive & export signed IPA
+        if: steps.ios_secrets.outputs.configured == 'true'
+        working-directory: ${{ env.PROJECT_DIR }}/ios/App
+        run: |
+          xcodebuild -workspace App.xcworkspace -scheme App -configuration Release \
+            -archivePath "$RUNNER_TEMP/App.xcarchive" -allowProvisioningUpdates archive
+
+          cat > "$RUNNER_TEMP/ExportOptions.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>ad-hoc</string>
+            <key>compileBitcode</key>
+            <false/>
+          </dict>
+          </plist>
+          PLIST
+
+          xcodebuild -exportArchive -archivePath "$RUNNER_TEMP/App.xcarchive" \
+            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" \
+            -exportPath "$RUNNER_TEMP/build"
+
+      - name: Build unsigned archive (no signing secrets configured)
+        if: steps.ios_secrets.outputs.configured == 'false'
+        working-directory: ${{ env.PROJECT_DIR }}/ios/App
+        run: |
+          echo "::warning::No Apple signing secrets found (IOS_CERTIFICATE_BASE64 / IOS_PROVISION_PROFILE_BASE64)."
+          echo "::warning::Building an UNSIGNED archive only - see MOBILE_BUILD.md to get a real, installable .ipa."
+          xcodebuild -workspace App.xcworkspace -scheme App -configuration Release \
+            CODE_SIGNING_ALLOWED=NO \
+            -archivePath "$RUNNER_TEMP/App.xcarchive" archive
+
+      # Wraps the unsigned App.app into a Payload/App.ipa zip, tak jak robił to
+      # Twój poprzedni workflow. WAŻNE: to wciąż jest NIEPODPISANY plik - samo
+      # przemianowanie na ".ipa" nie sprawia, że iOS pozwoli go zainstalować
+      # (Finder/AirDrop/Xcode go odrzucą, tak samo jak wcześniej). Realnie
+      # przydaje się do tego, żeby PODPISAĆ go samemu, lokalnie, za darmo,
+      # narzędziem typu Sideloadly albo AltStore, swoim zwykłym Apple ID -
+      # zobacz sekcję 7 w MOBILE_BUILD.md.
+      - name: Package unsigned IPA (Payload/App.ipa)
+        if: steps.ios_secrets.outputs.configured == 'false'
+        run: |
+          mkdir -p "$RUNNER_TEMP/Payload"
+          cp -r "$RUNNER_TEMP/App.xcarchive/Products/Applications/App.app" "$RUNNER_TEMP/Payload/"
+          cd "$RUNNER_TEMP"
+          zip -r -q App.ipa Payload
+          echo "::warning::App.ipa is UNSIGNED. It will NOT install directly via Finder/AirDrop/Xcode. Sign it yourself with Sideloadly or AltStore (free Apple ID) to actually install it - see MOBILE_BUILD.md section 7."
+
+      - name: Upload IPA (or unsigned archive)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-build
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/build/*.ipa
+            ${{ runner.temp }}/App.ipa
+            ${{ runner.temp }}/App.xcarchive

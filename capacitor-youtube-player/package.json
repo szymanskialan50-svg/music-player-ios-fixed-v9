@@ -1,0 +1,29 @@
+{
+  "name": "capacitor-youtube-player",
+  "version": "1.0.0",
+  "description": "Native YouTube Player for iOS",
+  "main": "dist/plugin.cjs.js",
+  "module": "dist/plugin.js",
+  "types": "dist/docs.d.ts",
+  "unpkg": "dist/plugin.js",
+  "files": [
+    "dist/",
+    "ios/Plugin/",
+    "CapacitorYoutubePlayer.podspec"
+  ],
+  "author": "x3lanix (based on Google youtube-ios-player-helper, Apache-2.0)",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@capacitor/core": "^8.5.0"
+  },
+  "devDependencies": {
+    "@capacitor/ios": "^8.5.0",
+    "typescript": "~5.8.3"
+  },
+  "capacitor": {
+    "ios": {
+      "src": "ios",
+      "pluginClass": "YouTubeCapacitorPlugin"
+    }
+  }
+}

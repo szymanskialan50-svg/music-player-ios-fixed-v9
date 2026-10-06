@@ -1,0 +1,50 @@
+name: iOS Build with YouTube Player
+on:
+  workflow_dispatch:
+
+jobs:
+  build-ios:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install Dependencies
+        working-directory: music-player-fixed
+        run: bun install
+
+      - name: Build Web
+        working-directory: music-player-fixed
+        run: npm run prepare:www
+        
+      - name: Add iOS Platform
+        working-directory: music-player-fixed
+        run: npx cap add ios --packagemanager cocoapods
+        
+      - name: Sync iOS
+        working-directory: music-player-fixed
+        run: npx cap sync ios
+        
+      - name: Enable Background Audio in Info.plist
+        working-directory: music-player-fixed/ios/App/App
+        run: |
+          /usr/libexec/PlistBuddy -c "Add :UIBackgroundModes array" Info.plist || true
+          /usr/libexec/PlistBuddy -c "Add :UIBackgroundModes:0 string audio" Info.plist || true
+        
+      - name: Build unsigned IPA
+        working-directory: music-player-fixed/ios/App
+        run: |
+          xcodebuild -workspace App.xcworkspace -scheme App -configuration Release CODE_SIGNING_ALLOWED=NO -archivePath "$RUNNER_TEMP/App.xcarchive" archive
+          mkdir -p "$RUNNER_TEMP/Payload"
+          cp -r "$RUNNER_TEMP/App.xcarchive/Products/Applications/App.app" "$RUNNER_TEMP/Payload/"
+          cd "$RUNNER_TEMP"
+          zip -r -q App.ipa Payload
+          
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-youtube-app
+          path: ${{ runner.temp }}/App.ipa
