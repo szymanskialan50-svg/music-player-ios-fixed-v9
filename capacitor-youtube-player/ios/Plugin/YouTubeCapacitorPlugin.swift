@@ -544,7 +544,7 @@ public class YouTubeCapacitorPlugin: CAPPlugin {
                     guard let self = self else { return }
                     self.artworkCache[key] = art
                     if let d = dataUrl { self.artDataCache[key] = d }
-                    if self.artworkCache.count > 40, let k = self.artworkCache.keys.first(where: {  != key }) { self.artworkCache.removeValue(forKey: k) }
+                    if self.artworkCache.count > 40, let k = self.artworkCache.keys.first(where: { $0 != key }) { self.artworkCache.removeValue(forKey: k) }
                     if self.npArtKey == key { self.npArtwork = art; self.npArtDataUrl = dataUrl; self.pushNowPlaying(); self.broadcastWebSession() }
                 }
             }.resume()
