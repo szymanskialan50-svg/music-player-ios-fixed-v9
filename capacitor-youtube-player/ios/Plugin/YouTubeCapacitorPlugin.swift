@@ -4,6 +4,7 @@ import AVFoundation
 import MediaPlayer
 import UIKit
 import Combine
+import YouTubePlayerKit
 
 @objc(YouTubeCapacitorPlugin)
 public class YouTubeCapacitorPlugin: CAPPlugin {
