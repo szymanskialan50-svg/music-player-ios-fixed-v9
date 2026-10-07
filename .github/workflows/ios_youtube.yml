@@ -37,7 +37,7 @@ jobs:
       - name: Build unsigned IPA
         working-directory: music-player-fixed/ios/App
         run: |
-          xcodebuild -workspace App.xcworkspace -scheme App -configuration Release CODE_SIGNING_ALLOWED=NO -archivePath "$RUNNER_TEMP/App.xcarchive" archive
+          xcodebuild -workspace App.xcworkspace -scheme App -configuration Release -sdk iphoneos -destination "generic/platform=iOS" CODE_SIGNING_ALLOWED=NO -archivePath "$RUNNER_TEMP/App.xcarchive" archive
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -r "$RUNNER_TEMP/App.xcarchive/Products/Applications/App.app" "$RUNNER_TEMP/Payload/"
           cd "$RUNNER_TEMP"
