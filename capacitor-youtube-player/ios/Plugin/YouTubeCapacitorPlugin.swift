@@ -6,6 +6,7 @@ import UIKit
 import Combine
 import YouTubePlayerKit
 
+@MainActor
 @objc(YouTubeCapacitorPlugin)
 public class YouTubeCapacitorPlugin: CAPPlugin {
 
@@ -54,7 +55,7 @@ public class YouTubeCapacitorPlugin: CAPPlugin {
     private var didHandleEndForCurrentLoad = false
     private var lastAdvanced: (index: Int, videoId: String)?
     private var bgTask: UIBackgroundTaskIdentifier = .invalid
-    
+
     private var cancellables = Set<AnyCancellable>()
 
     public override func load() {
@@ -67,23 +68,21 @@ public class YouTubeCapacitorPlugin: CAPPlugin {
             self.player = YouTubePlayer(
                 parameters: .init(
                     autoPlay: true,
-                    playsInline: true,
                     showControls: false,
-                    showFullscreenButton: false,
-                    showModestBranding: true
+                    showFullscreenButton: false
                 ),
                 configuration: .init(
                     allowsInlineMediaPlayback: true
                 )
             )
-            
+
             self.player?.statePublisher
                 .receive(on: DispatchQueue.main)
                 .sink { [weak self] state in
                     self?.handlePlayerState(state)
                 }
                 .store(in: &self.cancellables)
-                
+
             self.player?.playbackStatePublisher
                 .receive(on: DispatchQueue.main)
                 .sink { [weak self] playbackState in
@@ -104,11 +103,11 @@ public class YouTubeCapacitorPlugin: CAPPlugin {
             nc.addObserver(self, selector: #selector(self.mediaServicesReset), name: AVAudioSession.mediaServicesWereResetNotification, object: nil)
             nc.addObserver(self, selector: #selector(self.engineConfigChanged), name: .AVAudioEngineConfigurationChange, object: nil)
             nc.addObserver(self, selector: #selector(self.routeChanged(_:)), name: AVAudioSession.routeChangeNotification, object: nil)
-            
+
             self.startStateObserver()
         }
     }
-    
+
     private func handlePlayerState(_ state: YouTubePlayer.State) {
         if case .error(let error) = state {
             if !didNotifyErrorForCurrentLoad {
@@ -117,7 +116,7 @@ public class YouTubeCapacitorPlugin: CAPPlugin {
             }
         }
     }
-    
+
     private func handlePlaybackState(_ state: YouTubePlayer.PlaybackState) {
         let stateStr: String
         switch state {
@@ -129,7 +128,7 @@ public class YouTubeCapacitorPlugin: CAPPlugin {
         case .cued: stateStr = "cued"
         default: stateStr = "unknown"
         }
-        
+
         if stateStr == "playing" && intendedPlaybackState == "paused" {
             Task { try? await self.player?.pause() }
             return
@@ -231,7 +230,7 @@ public class YouTubeCapacitorPlugin: CAPPlugin {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                 guard let self = self, gen == self.resumeGeneration,
                       self.intendedPlaybackState == "playing", !self.isInterrupted else { return }
-                
+
                 let state = self.player?.playbackStateSubject.value
                 if state != .playing && state != .buffering {
                     self.activateAudioSession()
@@ -257,6 +256,7 @@ public class YouTubeCapacitorPlugin: CAPPlugin {
             self.pushNowPlaying()
         }
     }
+
     @objc func appDidEnterBackground() {
         DispatchQueue.main.async {
             self.beginResumeTask()
@@ -267,6 +267,7 @@ public class YouTubeCapacitorPlugin: CAPPlugin {
             }
         }
     }
+
     @objc func appDidBecomeActive() {
         DispatchQueue.main.async {
             if self.bgTask != .invalid { UIApplication.shared.endBackgroundTask(self.bgTask); self.bgTask = .invalid }
@@ -279,9 +280,11 @@ public class YouTubeCapacitorPlugin: CAPPlugin {
             }
         }
     }
+
     @objc func engineConfigChanged() {
         DispatchQueue.main.async { if self.intendedPlaybackState == "playing" { self.silentPlayer.recoverIfNeeded() } }
     }
+
     @objc func mediaServicesReset() {
         DispatchQueue.main.async {
             self.sessionNeedsActivation = true
@@ -295,12 +298,18 @@ public class YouTubeCapacitorPlugin: CAPPlugin {
         guard let raw = n.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
               let reason = AVAudioSession.RouteChangeReason(rawValue: raw) else { return }
         guard reason == .oldDeviceUnavailable else { return }
+
         let headsetPorts: [AVAudioSession.Port] = [.headphones, .bluetoothA2DP, .bluetoothHFP, .bluetoothLE, .usbAudio]
         let previous = n.userInfo?[AVAudioSessionRouteChangePreviousRouteKey] as? AVAudioSessionRouteDescription
-        let hadHeadset = previous?.outputs.contains(where: { headsetPorts.contains(.portType) }) ?? false
+        let hadHeadset = previous?.outputs.contains(where: { output in
+            headsetPorts.contains(output.portType)
+        }) ?? false
         guard hadHeadset else { return }
+
         DispatchQueue.main.async {
-            let stillHeadset = AVAudioSession.sharedInstance().currentRoute.outputs.contains(where: { headsetPorts.contains(.portType) })
+            let stillHeadset = AVAudioSession.sharedInstance().currentRoute.outputs.contains(where: { output in
+                headsetPorts.contains(output.portType)
+            })
             if !stillHeadset && !self.localMode { self.performPause() }
         }
     }
@@ -497,10 +506,10 @@ public class YouTubeCapacitorPlugin: CAPPlugin {
     private static func smallJpegDataUrl(_ img: UIImage) -> String? {
         let side: CGFloat = 400
         let fmt = UIGraphicsImageRendererFormat.default(); fmt.scale = 1; fmt.opaque = true
-        let r = UIGraphicsImageRenderer(size: CGSize(width: side, height: side), format: fmt)
-        let small = r.image { _ in img.draw(in: CGRect(x: 0, y: 0, width: side, height: side)) }
-        guard let jpg = small.jpegData(compressionQuality: 0.8) else { return nil }
-        return "data:image/jpeg;base64," + jpg.base64EncodedString()
+        let small = UIGraphicsImageRenderer(size: CGSize(width: side, height: side), format: fmt)
+        let jpg = small.image { _ in img.draw(in: CGRect(x: 0, y: 0, width: side, height: side)) }
+        guard let data = jpg.jpegData(compressionQuality: 0.8) else { return nil }
+        return "data:image/jpeg;base64," + data.base64EncodedString()
     }
 
     private static func artworkCandidates(_ raw: String) -> [String] {
